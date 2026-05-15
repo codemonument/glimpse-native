@@ -241,6 +241,38 @@ window.glimpse = {
 class GlimpsePanel: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    /// Accessory/frameless panel modes can bypass the normal menu-bar route for
+    /// ⌘C / ⌘V / ⌘X / ⌘A / ⌘Z (and ⇧⌘Z), so we add a responder-chain
+    /// fallback here. The installed Edit menu already handles the standard
+    /// regular-activation case; this kicks in when the menu bar isn't routing.
+    /// Credit: github.com/HazAT/glimpse#18 (Stefan Wagner).
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if super.performKeyEquivalent(with: event) { return true }
+        if NSApp.mainMenu?.performKeyEquivalent(with: event) == true { return true }
+
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let cmd: NSEvent.ModifierFlags = .command
+        let cmdShift: NSEvent.ModifierFlags = [.command, .shift]
+        guard modifiers == cmd || modifiers == cmdShift,
+              let chars = event.charactersIgnoringModifiers?.lowercased() else {
+            return false
+        }
+
+        let action: Selector?
+        switch (chars, modifiers) {
+        case ("c", cmd): action = #selector(NSText.copy(_:))
+        case ("x", cmd): action = #selector(NSText.cut(_:))
+        case ("v", cmd): action = #selector(NSText.paste(_:))
+        case ("a", cmd): action = #selector(NSText.selectAll(_:))
+        case ("z", cmd): action = Selector(("undo:"))
+        case ("z", cmdShift): action = Selector(("redo:"))
+        default: action = nil
+        }
+
+        guard let action else { return false }
+        return NSApp.sendAction(action, to: nil, from: self)
+    }
 }
 
 // MARK: - Status Item View Controller
@@ -343,6 +375,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
         if config.statusItem {
             setupStatusItem()
         } else {
+            installEditMenu()
             hidden = config.hidden
             cursorAnchor = config.cursorAnchor
             followMode = config.followMode
@@ -364,6 +397,39 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKScri
     }
 
     // MARK: - Setup
+
+    /// Install a standard Edit menu so AppKit's ⌘C / ⌘V / ⌘X / ⌘A / ⌘Z key
+    /// equivalents have a target in the responder chain. WKWebView already
+    /// implements cut:/copy:/paste:/selectAll:/undo:/redo:, so wiring up the
+    /// menu items with `target: nil` is enough — AppKit walks the responder
+    /// chain and the WebView picks them up. Without this, ⌘C beeps.
+    private func installEditMenu() {
+        let mainMenu = NSApp.mainMenu ?? NSMenu()
+
+        let editMenu = NSMenu(title: "Edit")
+        let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+        editItem.submenu = editMenu
+
+        func add(_ title: String, _ action: Selector, _ key: String,
+                 _ mods: NSEvent.ModifierFlags = .command) {
+            let mi = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            mi.keyEquivalentModifierMask = mods
+            editMenu.addItem(mi)
+        }
+
+        add("Undo",       Selector(("undo:")),       "z")
+        add("Redo",       Selector(("redo:")),       "z", [.command, .shift])
+        editMenu.addItem(.separator())
+        add("Cut",        #selector(NSText.cut(_:)),        "x")
+        add("Copy",       #selector(NSText.copy(_:)),       "c")
+        add("Paste",      #selector(NSText.paste(_:)),      "v")
+        add("Select All", #selector(NSText.selectAll(_:)),  "a")
+
+        // Insert after the auto-injected app menu (index 0) if present.
+        let insertAt = min(1, mainMenu.numberOfItems)
+        mainMenu.insertItem(editItem, at: insertAt)
+        NSApp.mainMenu = mainMenu
+    }
 
     private func setupWindow() {
         let rect = NSRect(x: 0, y: 0, width: config.width, height: config.height)

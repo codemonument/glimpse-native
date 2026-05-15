@@ -18,6 +18,9 @@ node_modules/
 .pi/*
 !.pi/skills/
 
+# soloterm local config
+solo.yml
+
 # macOS
 .DS_Store
 review.md
