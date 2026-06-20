@@ -33,7 +33,7 @@ switch (target) {
       fail([
         'Missing system dependencies. Install with:',
         '  Fedora:  dnf install gtk4-devel webkitgtk6.0-devel gtk4-layer-shell-devel',
-        '  Ubuntu:  apt install libgtk-4-dev libwebkitgtk-6.0-dev libgtk4-layer-shell-dev',
+        '  Ubuntu:  apt install libgtk-4-dev libwebkitgtk-6.0-dev; build gtk4-layer-shell from https://github.com/wmww/gtk4-layer-shell',
         '  Arch:    pacman -S gtk4 webkitgtk-6.0 gtk4-layer-shell',
       ].join('\n'));
     }

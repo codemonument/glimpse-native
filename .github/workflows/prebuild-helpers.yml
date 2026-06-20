@@ -62,13 +62,31 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            git \
+            meson \
+            ninja-build \
+            pkg-config \
+            gobject-introspection \
+            libgirepository1.0-dev \
+            valac \
             libgtk-4-dev \
-            libwebkitgtk-6.0-dev \
-            libgtk4-layer-shell-dev
+            libwebkitgtk-6.0-dev
+
+      - name: Install gtk4-layer-shell
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/wmww/gtk4-layer-shell.git /tmp/gtk4-layer-shell
+          meson setup /tmp/gtk4-layer-shell/build /tmp/gtk4-layer-shell --prefix=/usr
+          meson compile -C /tmp/gtk4-layer-shell/build
+          sudo meson install -C /tmp/gtk4-layer-shell/build
+          sudo ldconfig
 
       - name: Setup Rust
         if: runner.os == 'Linux'
-        run: rustup toolchain install stable --profile minimal
+        run: |
+          rustup toolchain install stable --profile minimal
+          git config --global url."https://github.com/".insteadOf git@github.com:
 
       - name: Setup .NET
         if: runner.os == 'Windows'
