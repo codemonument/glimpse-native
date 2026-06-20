@@ -1,0 +1,102 @@
+name: Prebuild helpers
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - prebuild-helpers
+  pull_request:
+    paths:
+      - .github/workflows/prebuild-helpers.yml
+      - scripts/build.mjs
+      - src/glimpse.swift
+      - src/linux/**
+      - native/windows/**
+      - NuGet.config
+      - package.json
+      - package-lock.json
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            runner: macos-14
+            build_target: darwin
+            artifact_path: dist/prebuilds/macos-arm64/glimpse
+          - name: windows-x64
+            runner: windows-latest
+            build_target: win32
+            artifact_path: dist/prebuilds/windows-x64
+          - name: linux-x64
+            runner: ubuntu-24.04
+            build_target: linux
+            artifact_path: dist/prebuilds/linux-x64/glimpse
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            build_target: linux
+            artifact_path: dist/prebuilds/linux-arm64/glimpse
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install npm metadata
+        run: npm ci --ignore-scripts
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-4-dev \
+            libwebkitgtk-6.0-dev \
+            libgtk4-layer-shell-dev
+
+      - name: Setup Rust
+        if: runner.os == 'Linux'
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Setup .NET
+        if: runner.os == 'Windows'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build native helper
+        run: node scripts/build.mjs ${{ matrix.build_target }}
+
+      - name: Stage Unix artifact
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p "$(dirname '${{ matrix.artifact_path }}')"
+          cp src/glimpse '${{ matrix.artifact_path }}'
+          chmod +x '${{ matrix.artifact_path }}'
+
+      - name: Stage Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path '${{ matrix.artifact_path }}'
+          Copy-Item -Path native/windows/bin/* -Destination '${{ matrix.artifact_path }}' -Recurse -Force
+
+      - name: Upload native helper artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: glimpse-${{ matrix.name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
