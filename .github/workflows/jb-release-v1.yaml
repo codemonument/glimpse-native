@@ -42,6 +42,16 @@ jobs:
           ATTEMPT_TAG="${GITHUB_REF_NAME}"
           IFS=/ read -r prefix bump expected_segment _timestamp <<< "$ATTEMPT_TAG"
 
+          git fetch origin main --tags --force
+          attempt_sha="$(git rev-parse HEAD)"
+          main_sha="$(git rev-parse origin/main)"
+          if [[ "$attempt_sha" != "$main_sha" ]]; then
+            echo "Release attempt tag must point at origin/main" >&2
+            echo "Attempt: $attempt_sha" >&2
+            echo "origin/main: $main_sha" >&2
+            exit 1
+          fi
+
           if [[ "$prefix" != "release-attempt" ]]; then
             echo "Unexpected tag prefix: $prefix" >&2
             exit 1
@@ -65,7 +75,6 @@ jobs:
           next="$(node -e "const [M,m,p]=process.argv[1].split('.').map(Number); const b=process.argv[2]; const n=b==='patch'?[M,m,p+1]:b==='minor'?[M,m+1,0]:[M+1,0,0]; console.log(n.join('.'))" "$current" "$bump")"
           tag="v$next"
 
-          git fetch --tags --force
           if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
             echo "Canonical release tag already exists: $tag" >&2
             exit 1
@@ -170,8 +179,17 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - name: Check Swift compiler
+        if: runner.os == 'macOS'
+        shell: bash
+        run: command -v swiftc
+
       - name: Build native helper
         run: node scripts/build.mjs ${{ matrix.build_target }}
+
+      - name: Run tests
+        if: matrix.name == 'darwin-arm64'
+        run: npm test
 
       - name: Package Unix asset
         if: runner.os != 'Windows'
@@ -206,7 +224,6 @@ jobs:
       NEXT_VERSION: ${{ needs.prepare.outputs.next }}
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
       ATTEMPT_TAG: ${{ needs.prepare.outputs.attempt_tag }}
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
       JB_RELEASE_PUBLISH_NPM: ${{ vars.JB_RELEASE_PUBLISH_NPM }}
     steps:
       - name: Checkout attempt commit
@@ -305,7 +322,7 @@ jobs:
           git tag "$RELEASE_TAG"
 
       - name: Publish npm package
-        if: env.JB_RELEASE_PUBLISH_NPM == 'true' && env.NPM_TOKEN != ''
+        if: env.JB_RELEASE_PUBLISH_NPM == 'true'
         shell: bash
         run: npm publish --provenance
 
@@ -336,5 +353,5 @@ jobs:
           - Attempt tag: \`$ATTEMPT_TAG\`
           - Version: \`$NEXT_VERSION\`
           - Assets: \`dist/release-assets/*\`
-          - npm publish: $([[ "$JB_RELEASE_PUBLISH_NPM" == "true" && -n "$NPM_TOKEN" ]] && echo "attempted" || echo "skipped; set repository variable JB_RELEASE_PUBLISH_NPM=true and secret NPM_TOKEN to enable")
+          - npm publish: $([[ "$JB_RELEASE_PUBLISH_NPM" == "true" ]] && echo "attempted with npm provenance" || echo "skipped; set repository variable JB_RELEASE_PUBLISH_NPM=true to enable")
           EOF

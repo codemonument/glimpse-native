@@ -610,7 +610,7 @@ Releases are started with disposable release-attempt tags so failed native build
 npm run release:attempt -- patch   # or minor / major
 ```
 
-The helper pushes a tag like `release-attempt/patch/from-0.8.1/20260620T093000Z`. GitHub Actions builds all native helpers first. Only after the matrix succeeds does it create the release commit, canonical `vX.Y.Z` tag, GitHub Release, and release assets. To also publish to npm with provenance, configure repository variable `JB_RELEASE_PUBLISH_NPM=true` and secret `NPM_TOKEN`.
+The helper pushes a tag like `release-attempt/patch/from-0.8.1/20260620T093000Z`. GitHub Actions builds all native helpers first. Only after the matrix succeeds does it create the release commit, canonical `vX.Y.Z` tag, GitHub Release, and release assets. To also publish to npm with trusted publishing/provenance, configure repository variable `JB_RELEASE_PUBLISH_NPM=true` and npm trusted publishing for this workflow.
 
 ## License
 
