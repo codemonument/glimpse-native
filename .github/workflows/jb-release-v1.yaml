@@ -1,0 +1,340 @@
+name: JB Release v1
+
+on:
+  push:
+    tags:
+      - "release-attempt/patch/from-*/*"
+      - "release-attempt/minor/from-*/*"
+      - "release-attempt/major/from-*/*"
+
+permissions:
+  contents: write
+  actions: read
+  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare release attempt
+    runs-on: ubuntu-latest
+    outputs:
+      bump: ${{ steps.plan.outputs.bump }}
+      current: ${{ steps.plan.outputs.current }}
+      expected_current: ${{ steps.plan.outputs.expected_current }}
+      next: ${{ steps.plan.outputs.next }}
+      tag: ${{ steps.plan.outputs.tag }}
+      attempt_tag: ${{ steps.plan.outputs.attempt_tag }}
+    steps:
+      - name: Checkout attempt commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+
+      - name: Plan release
+        id: plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          ATTEMPT_TAG="${GITHUB_REF_NAME}"
+          IFS=/ read -r prefix bump expected_segment _timestamp <<< "$ATTEMPT_TAG"
+
+          if [[ "$prefix" != "release-attempt" ]]; then
+            echo "Unexpected tag prefix: $prefix" >&2
+            exit 1
+          fi
+          if [[ ! "$bump" =~ ^(patch|minor|major)$ ]]; then
+            echo "Unexpected release bump: $bump" >&2
+            exit 1
+          fi
+          if [[ ! "$expected_segment" =~ ^from-[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected tag segment like from-0.8.1, got: $expected_segment" >&2
+            exit 1
+          fi
+
+          expected_current="${expected_segment#from-}"
+          current="$(node -p "require('./package.json').version")"
+          if [[ "$current" != "$expected_current" ]]; then
+            echo "Attempt expected package version $expected_current, but package.json is $current" >&2
+            exit 1
+          fi
+
+          next="$(node -e "const [M,m,p]=process.argv[1].split('.').map(Number); const b=process.argv[2]; const n=b==='patch'?[M,m,p+1]:b==='minor'?[M,m+1,0]:[M+1,0,0]; console.log(n.join('.'))" "$current" "$bump")"
+          tag="v$next"
+
+          git fetch --tags --force
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "Canonical release tag already exists: $tag" >&2
+            exit 1
+          fi
+
+          {
+            echo "bump=$bump"
+            echo "current=$current"
+            echo "expected_current=$expected_current"
+            echo "next=$next"
+            echo "tag=$tag"
+            echo "attempt_tag=$ATTEMPT_TAG"
+          } >> "$GITHUB_OUTPUT"
+
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          # Release attempt
+
+          - Attempt tag: \`$ATTEMPT_TAG\`
+          - Bump: \`$bump\`
+          - Current: \`$current\`
+          - Planned release: \`$tag\`
+          EOF
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: darwin-arm64
+            runner: macos-14
+            build_target: darwin
+            binary_path: src/glimpse
+            archive: glimpse-darwin-arm64.tar.gz
+          - name: win32-x64
+            runner: windows-latest
+            build_target: win32
+            binary_path: native/windows/bin
+            archive: glimpse-win32-x64.zip
+          - name: linux-x64
+            runner: ubuntu-24.04
+            build_target: linux
+            binary_path: src/glimpse
+            archive: glimpse-linux-x64.tar.gz
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            build_target: linux
+            binary_path: src/glimpse
+            archive: glimpse-linux-arm64.tar.gz
+
+    steps:
+      - name: Checkout attempt commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install npm metadata
+        run: npm ci --ignore-scripts
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git \
+            meson \
+            ninja-build \
+            pkg-config \
+            gobject-introspection \
+            libgirepository1.0-dev \
+            valac \
+            libgtk-4-dev \
+            libwebkitgtk-6.0-dev
+
+      - name: Install gtk4-layer-shell
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/wmww/gtk4-layer-shell.git /tmp/gtk4-layer-shell
+          meson setup /tmp/gtk4-layer-shell/build /tmp/gtk4-layer-shell --prefix=/usr
+          meson compile -C /tmp/gtk4-layer-shell/build
+          sudo meson install -C /tmp/gtk4-layer-shell/build
+          sudo ldconfig
+
+      - name: Setup Rust
+        if: runner.os == 'Linux'
+        run: |
+          rustup toolchain install stable --profile minimal
+          git config --global url."https://github.com/".insteadOf git@github.com:
+
+      - name: Setup .NET
+        if: runner.os == 'Windows'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build native helper
+        run: node scripts/build.mjs ${{ matrix.build_target }}
+
+      - name: Package Unix asset
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/release-assets
+          chmod +x "${{ matrix.binary_path }}"
+          tar -czf "dist/release-assets/${{ matrix.archive }}" -C "$(dirname '${{ matrix.binary_path }}')" "$(basename '${{ matrix.binary_path }}')"
+
+      - name: Package Windows asset
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/release-assets
+          Compress-Archive -Path '${{ matrix.binary_path }}/*' -DestinationPath 'dist/release-assets/${{ matrix.archive }}' -Force
+
+      - name: Upload release asset artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: dist/release-assets/${{ matrix.archive }}
+          if-no-files-found: error
+
+  finalize:
+    name: Finalize release
+    needs:
+      - prepare
+      - build
+    runs-on: ubuntu-latest
+    env:
+      NEXT_VERSION: ${{ needs.prepare.outputs.next }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      ATTEMPT_TAG: ${{ needs.prepare.outputs.attempt_tag }}
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      JB_RELEASE_PUBLISH_NPM: ${{ vars.JB_RELEASE_PUBLISH_NPM }}
+    steps:
+      - name: Checkout attempt commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install npm metadata
+        run: npm ci --ignore-scripts
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/release-assets
+          merge-multiple: true
+
+      - name: Create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist/release-assets
+          sha256sum -- * > checksums.txt
+          cat checksums.txt
+
+      - name: Update release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm version "$NEXT_VERSION" --no-git-tag-version --allow-same-version
+          node <<'NODE'
+          const { readFileSync, writeFileSync, existsSync } = require('node:fs');
+          const version = process.env.NEXT_VERSION;
+          const path = 'CHANGELOG.md';
+          if (!existsSync(path)) process.exit(0);
+          let text = readFileSync(path, 'utf8');
+          if (text.includes('## vNEXT')) {
+            text = text.replace('## vNEXT', `## ${version}`);
+          } else if (text.includes('## Unreleased')) {
+            text = text.replace('## Unreleased', `## ${version}`);
+          }
+          writeFileSync(path, text);
+          NODE
+
+      - name: Create release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous_tag="$(git tag -l 'v*' --sort=-version:refname | head -1 || true)"
+          {
+            echo "Install:"
+            echo ""
+            echo '```bash'
+            echo "npm install glimpseui@$NEXT_VERSION"
+            echo '```'
+            echo ""
+            echo "Pi agent package:"
+            echo ""
+            echo '```bash'
+            echo "pi install npm:glimpseui@$NEXT_VERSION"
+            echo '```'
+            echo ""
+            echo "Changes:"
+            echo ""
+            if [[ -n "$previous_tag" ]]; then
+              git log "$previous_tag"..HEAD --pretty=format:'- %s' --no-merges
+            else
+              git log --pretty=format:'- %s' --no-merges
+            fi
+            echo ""
+            echo ""
+            echo "Prebuilt native helpers are attached below."
+          } > /tmp/glimpse-release-notes.md
+          cat /tmp/glimpse-release-notes.md
+
+      - name: Commit release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json CHANGELOG.md
+          if git diff --cached --quiet; then
+            echo "No release file changes to commit" >&2
+            exit 1
+          fi
+          git commit -m "chore(release): $RELEASE_TAG"
+          git tag "$RELEASE_TAG"
+
+      - name: Publish npm package
+        if: env.JB_RELEASE_PUBLISH_NPM == 'true' && env.NPM_TOKEN != ''
+        shell: bash
+        run: npm publish --provenance
+
+      - name: Push release commit and tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push origin HEAD:main
+          git push origin "$RELEASE_TAG"
+
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" \
+            dist/release-assets/* \
+            --title "$RELEASE_TAG" \
+            --notes-file /tmp/glimpse-release-notes.md
+
+      - name: Summarize
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          # Released $RELEASE_TAG
+
+          - Attempt tag: \`$ATTEMPT_TAG\`
+          - Version: \`$NEXT_VERSION\`
+          - Assets: \`dist/release-assets/*\`
+          - npm publish: $([[ "$JB_RELEASE_PUBLISH_NPM" == "true" && -n "$NPM_TOKEN" ]] && echo "attempted" || echo "skipped; set repository variable JB_RELEASE_PUBLISH_NPM=true and secret NPM_TOKEN to enable")
+          EOF
